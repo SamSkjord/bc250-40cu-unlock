@@ -37,7 +37,6 @@ Signed-off-by: duggasco <duggasco@gmail.com>
  1 file changed, 46 insertions(+)
 
 diff --git a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
-index abcdef012345..abcdef012346 100644
 --- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
 +++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
 @@ -26,6 +26,13 @@
@@ -54,11 +53,12 @@ index abcdef012345..abcdef012346 100644
  #include "amdgpu.h"
  #include "amdgpu_gfx.h"
  #include "amdgpu_psp.h"
-@@ -10129,6 +10136,45 @@ static int gfx_v10_0_get_cu_info(struct amdgpu_device *adev,
+@@ -10127,6 +10134,39 @@
+ 	amdgpu_gfx_parse_disable_cu(disable_masks, 4, 2);
 
  	mutex_lock(&adev->grbm_idx_mutex);
 +
-+	/* BC-250: unlock harvested CUs — CC (enumeration) + SPI (dispatch) + RLC (power) */
++	/* BC-250: unlock harvested CUs -- CC (enumeration) + SPI (dispatch) + RLC (power) */
 +	if (bc250_cc_write_mode > 0 && adev->pdev->device == BC250_PCI_DEVICE_ID) {
 +		int bc_se, bc_sh;
 +		for (bc_se = 0; bc_se < adev->gfx.config.max_shader_engines; bc_se++) {
