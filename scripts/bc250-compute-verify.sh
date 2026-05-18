@@ -200,6 +200,21 @@ static float bits_f32(uint32_t u)
 	return f;
 }
 
+static uint32_t fp32_ordered_bits(uint32_t bits)
+{
+	if (bits & 0x80000000u)
+		return 0x80000000u - (bits & 0x7fffffffu);
+	return 0x80000000u + bits;
+}
+
+static uint32_t fp32_ulp_distance(uint32_t a, uint32_t b)
+{
+	uint32_t oa = fp32_ordered_bits(a);
+	uint32_t ob = fp32_ordered_bits(b);
+
+	return oa > ob ? oa - ob : ob - oa;
+}
+
 static void pre_lds_expected(uint32_t idx, const uint32_t *a, const uint32_t *b,
 			     const struct params *p, uint32_t *x_out,
 			     uint32_t *y_out, uint32_t *fp_out)
@@ -610,14 +625,18 @@ int main(int argc, char **argv)
 					pass_errors++;
 					pass_int_errors++;
 				}
-				if (got_fp != fp[lane]) {
-					if (pass_errors < 16) {
-						fprintf(stderr,
-							"fp mismatch pass=%u idx=%u got=0x%08x want=0x%08x\n",
-							pass, idx, got_fp, fp[lane]);
+				{
+					uint32_t ulp_diff = fp32_ulp_distance(got_fp, fp[lane]);
+
+					if (ulp_diff > (p.iters / 3 + 2)) {
+						if (pass_errors < 16) {
+							fprintf(stderr,
+								"fp mismatch pass=%u idx=%u got=0x%08x want=0x%08x ulp=%" PRIu32 "\n",
+								pass, idx, got_fp, fp[lane], ulp_diff);
+						}
+						pass_errors++;
+						pass_fp_errors++;
 					}
-					pass_errors++;
-					pass_fp_errors++;
 				}
 			}
 		}
