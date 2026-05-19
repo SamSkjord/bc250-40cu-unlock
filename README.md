@@ -131,20 +131,24 @@ WGP 1 = CU 2,3    (stock active)
 WGP 2 = CU 4,5    (stock active)
 WGP 3 = CU 6,7    (unlocked — test these)
 WGP 4 = CU 8,9    (unlocked — test these)
+
+WGP CU Map Preview Example:
+0 1 2 3 4 
+■■■■■■□□□□
 ```
 
 Disabling works at **WGP granularity** — disabling CU 6 also disables CU 7 (same WGP).
 
-Format: `amdgpu.disable_cu=SE.SH.CU` (comma-separated, added to modprobe config)
+Format: `amdgpu.disable_cu=SE.SH.WGP` (comma-separated, added to modprobe config)
 
 ### Examples
 
 ```bash
 # Enable all 40, but mask WGP 3 in SE1/SH0 (CUs 6-7) — gives 38 CUs
-options amdgpu bc250_cc_write_mode=3 disable_cu=1.0.6,1.0.7
+options amdgpu bc250_cc_write_mode=3 disable_cu=1.0.3
 
 # Mask WGP 4 across all shader arrays — gives 32 CUs
-options amdgpu bc250_cc_write_mode=3 disable_cu=0.0.8,0.0.9,0.1.8,0.1.9,1.0.8,1.0.9,1.1.8,1.1.9
+options amdgpu bc250_cc_write_mode=3 disable_cu=0.0.4,0.1.4,1.0.4,1.1.4
 ```
 
 ### Automated Health Testing
