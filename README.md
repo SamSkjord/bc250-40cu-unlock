@@ -165,6 +165,40 @@ frequency = 1500
 voltage = 900
 ```
 
+### Frequency stays at 1000 MHz under load (BC-250 load-detection limitation)
+
+The governor scales frequency based on GPU load, but the BC-250's amdgpu does not expose a
+usable GPU-load signal: `gpu_busy_percent` returns an error, and the alternative
+`gpu-usage.method = "process"` (per-process GPU engine time from fdinfo) also reads near zero.
+With no load signal the governor reads "idle" and parks the GPU at its minimum (1000 MHz) even
+in a demanding game. This is a hardware/driver limitation, not a misconfiguration, and it is
+why the package ships the `cyan-skillfish-performance-mode` tool. Pick a workaround:
+
+- Per-game (keeps idle downclocking): pin the clock only while a game runs, via a Steam launch
+  option that auto-releases on exit:
+
+  ```
+  cyan-skillfish-performance-mode --fixed-frequency 1850 %command%
+  ```
+
+- Persistent floor (survives reboots, no idle downclock): set `min` equal to `max` so the
+  governor clamps to a single point regardless of the missing load signal. The GPU then sits at
+  the pinned clock at all times, including the desktop:
+
+  ```toml
+  # /etc/cyan-skillfish-governor-smu/config.toml
+  [frequency-range]
+  min = 1850
+  max = 1850
+  ```
+
+- Runtime only (reverts on reboot): `cyan-skillfish-performance-mode --fixed-frequency 1850`,
+  or `--range 1000 1850`, or `--off` to return to adaptive.
+
+1500 MHz / 900 mV is the conservative sweet spot; 1850 MHz is the governor's default ceiling and
+runs about 54-57C in-game on air. Thermal throttling (config `temperature.throttling`, default
+85C) stays active even when the clock is pinned.
+
 ## Selective CU Masking
 
 Not all unlocked CUs are healthy. Boards with scattered harvest patterns (`■■□□■■□□■■`) are
