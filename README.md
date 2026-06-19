@@ -31,6 +31,11 @@ The patch writes both during `gfx_v10_0_get_cu_info()`, guarded by `device == 0x
 
 ## Quick Start
 
+> **Immutable / atomic distros (Bazzite, Silverblue, SteamOS):** the kernel-module
+> rebuild in Options 1-3 cannot take effect. `/usr` and `/lib/modules` are read-only
+> and the initramfs is image-managed, so `dracut` regeneration fails. Use Option 4
+> (runtime register writes via UMR) instead.
+
 ### Option 1: Build Script (any distro)
 
 ```bash
@@ -67,6 +72,36 @@ sudo reboot
 
 Apply `patch/bc250-40cu-amdgpu.patch` to your kernel PKGBUILD patch set, rebuild, add the modprobe config.
 
+### Option 4: Bazzite / atomic (rpm-ostree), runtime UMR (no kernel patch)
+
+On atomic distros the module patch cannot persist, so write the CC and SPI registers at
+runtime via UMR instead. `bc250-cu-live-manager.sh` does this and can install a boot
+service to re-apply on every boot. Nothing is permanent: a reboot without the service
+returns to stock 24 CU.
+
+```bash
+# umr must be present. On Bazzite:
+#   rpm-ostree install umr        # then reboot to finalize (see note below)
+sudo ./bc250-cu-live-manager.sh status            # current routed CU table
+sudo ./bc250-cu-live-manager.sh enable all        # route all 40 CUs (live, volatile)
+sudo ./bc250-cu-live-manager.sh write-service-table
+sudo ./bc250-cu-live-manager.sh install-service   # persist across reboots
+```
+
+Caution: if your board has any defective unlocked WGPs, `enable all` can instantly
+hard-lock the GPU (black screen). Find a stable subset first with the bisector in
+"Selective CU Masking" below, then enable only the good pairs.
+
+Bazzite / rpm-ostree notes:
+
+- Layer packages with `rpm-ostree install <pkg>`, not `dnf`. The compute verifier needs
+  `glslang`, `vulkan-headers`, and `vulkan-loader-devel`; `umr` is also a layered package.
+- A layer installed with `--apply-live` is only finalized into the deployment on a *clean*
+  shutdown. A hard power-cycle (for example recovering from a GPU hang) discards the staged
+  deployment and the packages vanish on next boot. Install without `--apply-live` and do one
+  clean `systemctl reboot` to finalize before any GPU poking, then confirm the packages
+  appear in `rpm-ostree status` under LayeredPackages.
+
 ## Verification
 
 After reboot:
@@ -83,6 +118,15 @@ dmesg | grep bc250-40cu
 # Check RADV
 RADV_DEBUG=info vulkaninfo --summary 2>&1 | grep num_cu
 # Expected: num_cu = 40
+```
+
+If you used Option 4 (runtime UMR), `active_cu_number`, `num_cu`, and `cu_map.sh` keep
+reporting 24: the firmware CC harvest layer is left at stock and work is routed through the
+SPI dispatch mask. Use the live manager dashboard and the compute verifier for the real count:
+
+```bash
+sudo ./bc250-cu-live-manager.sh status | grep 'active & routed'   # e.g. 36/40 or 40/40
+sudo ./scripts/bc250-compute-verify.sh                            # errors=0 confirms correctness
 ```
 
 ## CU Harvest Map
@@ -106,10 +150,12 @@ We're collecting maps from across the fleet to find out if all BC-250s share thi
 
 ## Governor / Thermal
 
-40 CU at 2 GHz draws ~181W and hits 96C. Recommended: cap at 1500 MHz / 900 mV via `cyan-skillfish-governor`:
+40 CU at 2 GHz draws ~181W and hits 96C. Recommended: cap at 1500 MHz / 900 mV via the
+governor. The currently maintained package is filippor's `cyan-skillfish-governor-smu`
+(install and enable with `systemctl enable --now cyan-skillfish-governor-smu`):
 
 ```toml
-# /etc/cyan-skillfish-governor/config.toml
+# /etc/cyan-skillfish-governor-smu/config.toml
 [[safe-points]]
 frequency = 350
 voltage = 700
@@ -121,7 +167,33 @@ voltage = 900
 
 ## Selective CU Masking
 
-Not all unlocked CUs may be healthy — boards with scattered harvest patterns (`■■□□■■□□■■`) may have defective silicon. You can enable all 40 CUs but selectively mask bad ones via `amdgpu.disable_cu`.
+Not all unlocked CUs are healthy. Boards with scattered harvest patterns (`■■□□■■□□■■`) are
+obvious candidates for defective silicon, but a contiguous harvest pattern does **not**
+guarantee the fused-off CUs are good. See the field counterexample below: one board with the
+standard contiguous `■■■■■■□□□□` layout still had two genuinely defective unlocked WGPs (one
+hard-locked the GPU on enable, the other miscomputed about 5% of results), giving a maximum
+stable config of 36/40. Test before trusting all 40.
+
+You can enable all 40 CUs and selectively exclude bad ones. On patched-module distros this is
+done via `amdgpu.disable_cu` in the modprobe config. On atomic distros (Option 4) you simply
+do not route the bad WGPs: enable only the good pairs with
+`bc250-cu-live-manager.sh enable-wgp <SE.SH.WGP ...>`.
+
+### Field counterexample (contiguous harvest, still defective)
+
+The README and whitepaper note that on the original research boards the fused-off CUs were
+disabled by firmware policy rather than silicon defect. That is not universal. A board running
+this tooling under Bazzite, with the standard contiguous harvest, bisected to:
+
+```
+WGP 0.0.3 (SE0 SH0, CU 6-7): BAD  - routing it instantly hard-locks the GPU
+WGP 0.0.4 (SE0 SH0, CU 8-9): BAD  - routes but returns ~5% wrong compute results
+all other 6 unlocked pairs:  PASS - stable, error-free
+=> max stable 36/40, both defects localized to shader array SE0.SH0
+```
+
+Treat the unlock as "all 40 are candidates, verify each" rather than "all 40 are guaranteed
+good."
 
 ### WGP / CU Mapping (per shader array)
 
@@ -153,8 +225,26 @@ options amdgpu bc250_cc_write_mode=3 disable_cu=0.0.4,0.1.4,1.0.4,1.1.4
 
 ### Automated Health Testing
 
+Two approaches depending on your distro.
+
+**Atomic distros (Bazzite etc.), recommended: runtime bisection (no reboots between tests).**
+`bc250-wgp-bisect.sh` enables one factory-disabled WGP pair at a time via the live manager,
+runs the compute verifier, then disables it. It writes a synced on-disk marker before each
+register write, so if a defective WGP hard-locks the machine, re-running `start` after the
+power-cycle records that pair as defective and continues instead of looping on it forever.
+
 ```bash
-# Run per-WGP isolation test (20 reboots, tests each WGP individually)
+sudo ./bc250-wgp-bisect.sh start     # bisect all 8 upper pairs; resume after any hard-lock
+sudo ./bc250-wgp-bisect.sh status    # verdict + the exact enable-wgp/persist commands
+```
+
+**Patched-module distros: per-WGP isolation across reboots.**
+
+```bash
+# Run per-WGP isolation test (20 reboots, tests each WGP individually).
+# NOTE: relies on modprobe.d + initramfs regeneration, which does NOT work on
+# atomic distros (dracut cannot rewrite the image-managed initramfs); use the
+# bisector above there instead.
 sudo ./scripts/bc250-cu-health-test.sh start
 
 # Quick correctness test on current config (no reboot)
@@ -169,6 +259,12 @@ sudo ./scripts/bc250-cu-mask.sh --results /var/lib/bc250-cu-health-test/results.
 # View harvest map with health overlay
 ./scripts/cu_map.sh --health /var/lib/bc250-cu-health-test/results.tsv
 ```
+
+The verifier and health test distinguish "could not run" from "bad hardware":
+`bc250-compute-verify.sh --check-deps` reports whether the build tools are present, the
+verifier exits 3 (not a generic failure) when a dependency is missing, and the health test
+records such a run as `SKIP` rather than a false `FAIL`. A WGP that hard-locks the machine is
+recorded `FAIL` on the recovery boot instead of being retested indefinitely.
 
 ## Disabling
 
@@ -198,7 +294,7 @@ See [docs/technical-report.md](docs/technical-report.md) for additional technica
 - Default off (`bc250_cc_write_mode=0`) — does nothing unless explicitly enabled
 - Guarded by PCI device ID `0x13FE` — only fires on BC-250
 - No permanent hardware changes — reboot without the config returns to stock 24 CU
-- The harvested CUs have power, clocks, and matching CGTS config — they were disabled by firmware policy, not silicon defects (RLC_PG_CNTL = 0, no power gating active)
+- On the original research boards the harvested CUs had power, clocks, and matching CGTS config (RLC_PG_CNTL = 0, no power gating active), indicating they were disabled by firmware policy rather than silicon defect. This is not universal: at least one in-the-wild board with a contiguous harvest pattern had genuinely defective unlocked WGPs (see "Selective CU Masking"). Verify each unlocked WGP with the bisector or compute verifier before relying on all 40.
 
 ## Credits
 

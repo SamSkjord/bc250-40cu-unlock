@@ -76,7 +76,11 @@ The SPI mask was discovered via UMR register analysis. On Vangogh (another RDNA2
 - **CGTS** clock gating registers show identical configuration for harvested WGPs (3-4) and active WGPs (0-2) — the clock tree serves all 5 WGPs
 - **RLC_PG_CNTL = 0** — all power gating is disabled on BC-250
 - **glmark2** (3D graphics): 9430 → 9844 (+4.4%) — expected, graphics is fill-rate bound not CU-bound
-- CUs pass Vulkan compute correctness tests (4M elements, zero errors) at 40 CU
+- CUs pass Vulkan compute correctness tests (4M elements, zero errors) at 40 CU on the two
+  research boards. This is per-board and not guaranteed across the fleet: a later in-the-wild
+  board with the same contiguous `■■■■■■□□□□` harvest had two defective unlocked WGPs in shader
+  array SE0.SH0 (WGP 0.0.3 hard-locks the GPU on enable; WGP 0.0.4 returns ~5% wrong results),
+  giving a maximum stable config of 36/40. The fused-off region is not always healthy silicon.
 
 ## How To Apply
 
@@ -88,7 +92,16 @@ The SPI mask was discovered via UMR register analysis. On Vangogh (another RDNA2
    umr -w cyan_skillfish.gfx1013.mmSPI_PG_ENABLE_STATIC_WGP_MASK 0x1f
    umr -w cyan_skillfish.gfx1013.mmRLC_PG_ALWAYS_ON_WGP_MASK 0x1f
    ```
-5. Configure governor for 1500 MHz / 900 mV sweet spot
+5. Configure governor for 1500 MHz / 900 mV sweet spot (package: `cyan-skillfish-governor-smu`,
+   config `/etc/cyan-skillfish-governor-smu/config.toml`)
+
+On immutable / atomic distros (Bazzite, Silverblue, SteamOS) the patched module cannot be
+installed (`/usr` and the initramfs are image-managed; `dracut` regeneration fails). There,
+write both registers at runtime with UMR via `bc250-cu-live-manager.sh`, which clears the CC
+harvest mask and sets the SPI dispatch mask per shader array and installs a boot service to
+re-apply on each boot. Note that `active_cu_number` stays at 24 under this method (the driver
+boot topology is unchanged); the SPI routing is what makes the extra CUs compute, confirmed by
+the compute verifier.
 
 **TODO:** Integrate SPI write into the amdgpu kernel patch so both changes happen at driver init (no UMR needed post-boot).
 
