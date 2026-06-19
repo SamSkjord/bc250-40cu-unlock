@@ -220,7 +220,7 @@ build_module() {
     #   ${kbuild}/drivers/gpu/drm/amd/amdgpu/amdgpu_trace.h
     # That directory already exists in linux-headers (contains only Kconfig),
     # so we copy the trace header there temporarily for the build.
-    local kbuild="${MODDIR}/build"
+    local kbuild="/tmp/bc250-kbuild-rw"
     local kbuild_amdgpu="${kbuild}/drivers/gpu/drm/amd/amdgpu"
     local trace_dst="${kbuild_amdgpu}/amdgpu_trace.h"
     local trace_copied=0

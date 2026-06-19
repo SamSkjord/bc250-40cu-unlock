@@ -13,6 +13,9 @@ ITERS="${BC250_CU_HEALTH_ITERS:-64}"
 REBOOT_DELAY="${BC250_CU_HEALTH_REBOOT_DELAY:-5}"
 FINAL_REBOOT="${BC250_CU_HEALTH_FINAL_REBOOT:-1}"
 
+# Set by run_verify_for_target: the verifier's exit code (3 = could not run).
+LAST_VERIFY_RC=0
+
 usage() {
 	cat <<EOF
 Usage: $0 start|resume|quick|status|reset
@@ -146,16 +149,45 @@ run_verify_for_target() {
 	rc=0
 
 	echo "Testing target index=$target SE$se SH$sh WGP$wgp..."
+	# Record an on-disk marker (synced) BEFORE touching the GPU. If this target
+	# hard-locks the machine, the verifier never returns and no result row is
+	# written; the marker is how the next boot knows this WGP hung rather than
+	# blindly re-testing it and locking up again.
+	echo "$target" >"$STATEDIR/attempt"
+	sync
 	set +e
 	"$VERIFY" --elements "$ELEMENTS" --passes "$PASSES" --iters "$ITERS" 2>&1 | tee "$log"
 	rc=${PIPESTATUS[0]}
 	set -e
-	[ "$rc" -eq 0 ] || status="FAIL"
+	LAST_VERIFY_RC="$rc"
+	case "$rc" in
+		0) status="PASS" ;;
+		3) status="SKIP" ;;  # verifier could not run (missing deps) - NOT a bad core
+		*) status="FAIL" ;;
+	esac
 	finished="$(date -Iseconds)"
 
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$target" "$se" "$sh" "$wgp" "$status" "$rc" \
 		"${cu_count:-unknown}" "$started" "$finished" >>"$STATEDIR/results.tsv"
+	rm -f "$STATEDIR/attempt"
+	sync
+}
+
+record_hang() {
+	local target="$1"
+	local se sh wgp cu_count now
+
+	read -r se sh wgp < <(target_to_tuple "$target")
+	cu_count="$(current_cu_count || true)"
+	now="$(date -Iseconds)"
+	echo "Target index=$target SE$se SH$sh WGP$wgp hard-locked the machine on the previous boot." >&2
+	echo "Recording it as FAIL (defective WGP) and continuing with the next target." >&2
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$target" "$se" "$sh" "$wgp" "FAIL" "hang" \
+		"${cu_count:-unknown}" "$now" "$now" >>"$STATEDIR/results.tsv"
+	rm -f "$STATEDIR/attempt"
+	sync
 }
 
 next_reboot() {
@@ -179,7 +211,7 @@ finish_test() {
 	echo "done" >"$STATEDIR/phase"
 	echo "Per-WGP health test complete."
 	echo "Results: $STATEDIR/results.tsv"
-	awk -F'\t' 'BEGIN{pass=0; fail=0} $5=="PASS"{pass++} $5=="FAIL"{fail++} END{printf "PASS WGPs: %d  FAIL WGPs: %d  usable CUs: %d/40\n", pass, fail, 40 - fail * 2}' "$STATEDIR/results.tsv"
+	awk -F'\t' 'BEGIN{pass=0; fail=0; skip=0} $5=="PASS"{pass++} $5=="FAIL"{fail++} $5=="SKIP"{skip++} END{printf "PASS WGPs: %d  FAIL WGPs: %d  SKIP WGPs: %d  usable CUs: %d/40\n", pass, fail, skip, pass * 2}' "$STATEDIR/results.tsv"
 	if [ "$FINAL_REBOOT" = "1" ]; then
 		echo "Rebooting in $REBOOT_DELAY seconds to reload amdgpu with the restored full-40CU config..."
 		sleep "$REBOOT_DELAY"
@@ -194,6 +226,7 @@ case "$cmd" in
 	start)
 		need_root
 		[ -x "$VERIFY" ] || die "verifier not executable: $VERIFY"
+		"$VERIFY" --check-deps || die "compute verifier build dependencies are missing; refusing to install the resume service and reboot. Install them first (e.g. glslang, gcc, vulkan-loader-devel)."
 		mkdir -p "$STATEDIR/logs"
 		cat >"$STATEDIR/results.tsv" <<'EOF'
 #idx	se	sh	wgp	status	rc	active_cu	started	finished
@@ -209,7 +242,23 @@ EOF
 		phase="$(cat "$STATEDIR/phase" 2>/dev/null || echo missing)"
 		[ "$phase" = "running" ] || die "health test is not running (phase=$phase)"
 		target="$(cat "$STATEDIR/current_target" 2>/dev/null || echo 0)"
-		run_verify_for_target "$target"
+		attempt="$(cat "$STATEDIR/attempt" 2>/dev/null || echo "")"
+		if [ "$attempt" = "$target" ]; then
+			# We are resuming after a boot that already started testing this
+			# target but never finished it -> it hard-locked the machine.
+			# Mark it defective and advance instead of re-testing (which would
+			# just hard-lock again on every reboot).
+			record_hang "$target"
+		else
+			run_verify_for_target "$target"
+		fi
+		if [ "$LAST_VERIFY_RC" -eq 3 ]; then
+			echo "ERROR: compute verifier could not run (missing build dependencies)." >&2
+			echo "       This is a toolchain problem, not a bad WGP. Health test aborted." >&2
+			echo "       Install deps (e.g. glslang, gcc, vulkan-loader-devel), then run:" >&2
+			echo "         sudo $0 reset && sudo $0 start" >&2
+			exit 3
+		fi
 		next=$((target + 1))
 		if [ "$next" -lt 20 ]; then
 			next_reboot "$next"

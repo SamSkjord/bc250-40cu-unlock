@@ -7,10 +7,18 @@ ELEMENTS=16777216
 PASSES=3
 ITERS=64
 KEEP_TMP=0
+CHECK_DEPS_ONLY=0
+
+# Exit codes:
+#   0  success (cores computed correctly)
+#   2  compute mismatches detected (suspect hardware/config)
+#   3  build/toolchain dependency missing or compile failed (test could NOT run)
 
 usage() {
 	cat <<EOF
-Usage: $0 [--elements N] [--passes N] [--iters N] [--keep-tmp]
+Usage: $0 [--elements N] [--passes N] [--iters N] [--keep-tmp] [--check-deps]
+
+  --check-deps  Verify build tools are present, then exit (0 = ok, 3 = missing).
 
 Runs a Vulkan compute correctness test with:
   - FP32 fma chains
@@ -39,6 +47,10 @@ while [ "$#" -gt 0 ]; do
 			;;
 		--keep-tmp)
 			KEEP_TMP=1
+			shift
+			;;
+		--check-deps)
+			CHECK_DEPS_ONLY=1
 			shift
 			;;
 		-h|--help)
@@ -70,14 +82,23 @@ if [ $((ELEMENTS % 256)) -ne 0 ]; then
 	exit 2
 fi
 
+missing_dep=0
 command -v glslangValidator >/dev/null 2>&1 || {
-	echo "ERROR: glslangValidator not found" >&2
-	exit 1
+	echo "ERROR: glslangValidator not found (install the 'glslang' package)" >&2
+	missing_dep=1
 }
 command -v gcc >/dev/null 2>&1 || {
 	echo "ERROR: gcc not found" >&2
-	exit 1
+	missing_dep=1
 }
+if [ "$missing_dep" -ne 0 ]; then
+	echo "ERROR: missing build dependencies; the compute verifier cannot run" >&2
+	exit 3
+fi
+if [ "$CHECK_DEPS_ONLY" -eq 1 ]; then
+	echo "Compute-verify build dependencies present."
+	exit 0
+fi
 
 TMPDIR="$(mktemp -d)"
 if [ "$KEEP_TMP" -eq 0 ]; then
@@ -680,9 +701,15 @@ int main(int argc, char **argv)
 C
 
 echo "Compiling compute verifier..."
-glslangValidator -V "$TMPDIR/bc250_compute_verify.comp" -o "$TMPDIR/bc250_compute_verify.spv" >/dev/null
-gcc -std=c11 -O2 -Wall -Wextra -o "$TMPDIR/bc250_compute_verify" \
-	"$TMPDIR/bc250_compute_verify.c" -lvulkan -lm
+if ! glslangValidator -V "$TMPDIR/bc250_compute_verify.comp" -o "$TMPDIR/bc250_compute_verify.spv" >/dev/null; then
+	echo "ERROR: shader compilation failed; the compute verifier cannot run" >&2
+	exit 3
+fi
+if ! gcc -std=c11 -O2 -Wall -Wextra -o "$TMPDIR/bc250_compute_verify" \
+	"$TMPDIR/bc250_compute_verify.c" -lvulkan -lm; then
+	echo "ERROR: verifier compilation failed (missing vulkan-headers / vulkan-loader-devel?); cannot run" >&2
+	exit 3
+fi
 
 echo "Running BC-250 compute verifier..."
 "$TMPDIR/bc250_compute_verify" "$TMPDIR/bc250_compute_verify.spv" "$ELEMENTS" "$PASSES" "$ITERS"
